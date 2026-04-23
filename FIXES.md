@@ -104,13 +104,12 @@ REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 * **File:** `worker/worker.py`
 
 * **Problem:**
-  The worker did not handle termination signals. When Docker stops a container, it sends a `SIGTERM`. Without handling this, the worker could be terminated mid-job, leading to inconsistent state.
+  The worker did not handle termination signals. When Docker stops a container, it sends a `SIGTERM`. Without handling this, the worker could be terminated mid-job, leading to an inconsistent state.
 
 * **Fix:**
   Added signal handlers for `SIGTERM` and `SIGINT`:
 
   * Introduced a shutdown flag
-  * Allowed the worker to complete the current job before exiting cleanly
 
 ---
 
