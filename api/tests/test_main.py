@@ -18,6 +18,7 @@ def reset_mock():
     mock_redis_instance.reset_mock()
     yield
 
+
 # ── Test 1: Health endpoint ──────────────────────────────────────
 def test_health_returns_ok():
     response = client.get("/health")
