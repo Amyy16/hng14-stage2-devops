@@ -74,10 +74,11 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install pytest pytest-cov fastapi redis
+        run: pip install -r requirements.txt
 
       - name: Run tests with coverage
-        run: pytest --cov=api --cov-report=xml
+        run: cd api
+             pytest --cov=. --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
