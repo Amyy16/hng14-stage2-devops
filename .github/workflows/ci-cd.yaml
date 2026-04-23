@@ -1,324 +1,275 @@
 name: Stage 2 DevOps Full CI/CD Pipeline
 
 on:
-push:
-branches: ["*"]
-pull_request:
+  push:
+    branches: ["*"]
+  pull_request:
 
 # =====================================================
-
 # 1. LINT STAGE
-
 # =====================================================
-
 jobs:
-lint:
-runs-on: ubuntu-latest
+  lint:
+    runs-on: ubuntu-latest
 
-```
-steps:
-  - name: Checkout
-    uses: actions/checkout@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  - name: Setup Python
-    uses: actions/setup-python@v5
-    with:
-      python-version: "3.12"
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-  - name: Setup Node
-    uses: actions/setup-node@v4
-    with:
-      node-version: "20"
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-  - name: Install Python lint tools
-    run: pip install flake8
+      - name: Install Python lint tools
+        run: pip install flake8
 
-  - name: Lint Python
-    run: flake8 api/ worker/
+      - name: Lint Python
+        run: flake8 api/ worker/
 
-  - name: Install frontend deps
-    working-directory: frontend
-    run: npm install
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm install
 
-  - name: Lint JavaScript
-    working-directory: frontend
-    run: npx eslint .
+      - name: Lint JavaScript
+        working-directory: frontend
+        run: npx eslint .
 
-  - name: Install hadolint
-    run: |
-      sudo apt-get update
-      sudo apt-get install -y hadolint
+      - name: Install hadolint
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y hadolint
 
-  - name: Lint Dockerfiles
-    run: |
-      hadolint api/Dockerfile
-      hadolint worker/Dockerfile
-      hadolint frontend/Dockerfile
-```
+      - name: Lint Dockerfiles
+        run: |
+          hadolint api/Dockerfile
+          hadolint worker/Dockerfile
+          hadolint frontend/Dockerfile
 
 # =====================================================
-
 # 2. TEST STAGE
+# =====================================================
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pytest pytest-cov fastapi redis
+
+      - name: Run tests with coverage
+        run: pytest --cov=api --cov-report=xml
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
 
 # =====================================================
+# 3. BUILD STAGE
+# =====================================================
+  build:
+    runs-on: ubuntu-latest
+    needs: test
 
-test:
-runs-on: ubuntu-latest
-needs: lint
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
 
-```
-services:
-  redis:
-    image: redis:7-alpine
-    ports:
-      - 6379:6379
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-steps:
-  - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-  - name: Setup Python
-    uses: actions/setup-python@v5
-    with:
-      python-version: "3.12"
+      - name: Generate SHA tags
+        id: sha
+        run: |
+          echo "short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          echo "full=${GITHUB_SHA}" >> $GITHUB_OUTPUT
 
-  - name: Install dependencies
-    run: pip install pytest pytest-cov fastapi redis
+      - name: Wait for registry
+        run: |
+          for i in {1..10}; do
+            curl -s http://localhost:5000/v2/ && break
+            sleep 2
+          done
 
-  - name: Run tests with coverage
-    run: pytest --cov=api --cov-report=xml
+      - name: Build API image
+        run: |
+          docker build -t localhost:5000/api:${{ steps.sha.outputs.short }} ./api
+          docker tag localhost:5000/api:${{ steps.sha.outputs.short }} localhost:5000/api:latest
 
-  - name: Upload coverage artifact
-    uses: actions/upload-artifact@v4
-    with:
-      name: coverage-report
-      path: coverage.xml
-```
+      - name: Build Worker image
+        run: |
+          docker build -t localhost:5000/worker:${{ steps.sha.outputs.short }} ./worker
+          docker tag localhost:5000/worker:${{ steps.sha.outputs.short }} localhost:5000/worker:latest
+
+      - name: Build Frontend image
+        run: |
+          docker build -t localhost:5000/frontend:${{ steps.sha.outputs.short }} ./frontend
+          docker tag localhost:5000/frontend:${{ steps.sha.outputs.short }} localhost:5000/frontend:latest
+
+      - name: Push API image
+        run: |
+          docker push localhost:5000/api:${{ steps.sha.outputs.short }}
+          docker push localhost:5000/api:latest
+
+      - name: Push Worker image
+        run: |
+          docker push localhost:5000/worker:${{ steps.sha.outputs.short }}
+          docker push localhost:5000/worker:latest
+
+      - name: Push Frontend image
+        run: |
+          docker push localhost:5000/frontend:${{ steps.sha.outputs.short }}
+          docker push localhost:5000/frontend:latest
 
 # =====================================================
+# 4. SECURITY STAGE
+# =====================================================
+  security:
+    runs-on: ubuntu-latest
+    needs: build
 
-# 3. BUILD STAGE (FIXED + COMPLETE)
+    steps:
+      - name: Install Trivy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget apt-transport-https gnupg
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb stable main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+      - name: Scan API image
+        run: |
+          trivy image \
+            --exit-code 1 \
+            --severity CRITICAL \
+            --format sarif \
+            --output trivy-api.sarif \
+            localhost:5000/api:${{ github.sha }}
+
+      - name: Scan Worker image
+        run: |
+          trivy image \
+            --exit-code 1 \
+            --severity CRITICAL \
+            --format sarif \
+            --output trivy-worker.sarif \
+            localhost:5000/worker:${{ github.sha }}
+
+      - name: Scan Frontend image
+        run: |
+          trivy image \
+            --exit-code 1 \
+            --severity CRITICAL \
+            --format sarif \
+            --output trivy-frontend.sarif \
+            localhost:5000/frontend:${{ github.sha }}
+
+      - name: Upload SARIF reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-reports
+          path: |
+            trivy-api.sarif
+            trivy-worker.sarif
+            trivy-frontend.sarif
 
 # =====================================================
-
-build:
-runs-on: ubuntu-latest
-needs: test
-
-```
-services:
-  registry:
-    image: registry:2
-    ports:
-      - 5000:5000
-
-steps:
-  - name: Checkout
-    uses: actions/checkout@v4
-
-  # -----------------------------
-  # Docker Buildx (REQUIRED BEST PRACTICE)
-  # -----------------------------
-  - name: Set up Docker Buildx
-    uses: docker/setup-buildx-action@v3
-
-  # -----------------------------
-  # SHA TAG GENERATION
-  # -----------------------------
-  - name: Generate SHA tags
-    id: sha
-    run: |
-      echo "short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
-      echo "full=${GITHUB_SHA}" >> $GITHUB_OUTPUT
-
-  # -----------------------------
-  # WAIT FOR REGISTRY
-  # -----------------------------
-  - name: Wait for registry
-    run: |
-      for i in {1..10}; do
-        curl -s http://localhost:5000/v2/ && break
-        sleep 2
-      done
-
-  # -----------------------------
-  # BUILD IMAGES
-  # -----------------------------
-  - name: Build API image
-    run: |
-      docker build -t localhost:5000/api:${{ steps.sha.outputs.short }} ./api
-      docker tag localhost:5000/api:${{ steps.sha.outputs.short }} localhost:5000/api:latest
-
-  - name: Build Worker image
-    run: |
-      docker build -t localhost:5000/worker:${{ steps.sha.outputs.short }} ./worker
-      docker tag localhost:5000/worker:${{ steps.sha.outputs.short }} localhost:5000/worker:latest
-
-  - name: Build Frontend image
-    run: |
-      docker build -t localhost:5000/frontend:${{ steps.sha.outputs.short }} ./frontend
-      docker tag localhost:5000/frontend:${{ steps.sha.outputs.short }} localhost:5000/frontend:latest
-
-  # -----------------------------
-  # PUSH IMAGES
-  # -----------------------------
-  - name: Push API image
-    run: |
-      docker push localhost:5000/api:${{ steps.sha.outputs.short }}
-      docker push localhost:5000/api:latest
-
-  - name: Push Worker image
-    run: |
-      docker push localhost:5000/worker:${{ steps.sha.outputs.short }}
-      docker push localhost:5000/worker:latest
-
-  - name: Push Frontend image
-    run: |
-      docker push localhost:5000/frontend:${{ steps.sha.outputs.short }}
-      docker push localhost:5000/frontend:latest
-```
-
-# =====================================================
-
-# 4. SECURITY STAGE (TRIVY FULL COMPLIANCE)
-
-# =====================================================
-
-security:
-runs-on: ubuntu-latest
-needs: build
-
-```
-steps:
-  - name: Install Trivy
-    run: |
-      sudo apt-get update
-      sudo apt-get install -y wget apt-transport-https gnupg
-      wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-      echo "deb https://aquasecurity.github.io/trivy-repo/deb stable main" | sudo tee /etc/apt/sources.list.d/trivy.list
-      sudo apt-get update
-      sudo apt-get install -y trivy
-
-  # ---------------- API SCAN ----------------
-  - name: Scan API image
-    run: |
-      trivy image \
-        --exit-code 1 \
-        --severity CRITICAL \
-        --format sarif \
-        --output trivy-api.sarif \
-        localhost:5000/api:${{ github.sha }}
-
-  # ---------------- WORKER SCAN ----------------
-  - name: Scan Worker image
-    run: |
-      trivy image \
-        --exit-code 1 \
-        --severity CRITICAL \
-        --format sarif \
-        --output trivy-worker.sarif \
-        localhost:5000/worker:${{ github.sha }}
-
-  # ---------------- FRONTEND SCAN ----------------
-  - name: Scan Frontend image
-    run: |
-      trivy image \
-        --exit-code 1 \
-        --severity CRITICAL \
-        --format sarif \
-        --output trivy-frontend.sarif \
-        localhost:5000/frontend:${{ github.sha }}
-
-  # ---------------- UPLOAD SARIF ----------------
-  - name: Upload SARIF reports
-    uses: actions/upload-artifact@v4
-    with:
-      name: trivy-reports
-      path: |
-        trivy-api.sarif
-        trivy-worker.sarif
-        trivy-frontend.sarif
-```
-
-# =====================================================
-
 # 5. INTEGRATION TEST STAGE
+# =====================================================
+  integration:
+    runs-on: ubuntu-latest
+    needs: security
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Start stack
+        run: docker-compose up -d --build
+
+      - name: Wait for API health
+        run: |
+          for i in {1..20}; do
+            curl -f http://localhost:8000/health && break
+            sleep 3
+          done
+
+      - name: Submit job
+        run: |
+          JOB_ID=$(curl -s -X POST http://localhost:3000/submit | jq -r '.job_id')
+          echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
+
+      - name: Poll job status
+        run: |
+          for i in {1..15}; do
+            STATUS=$(curl -s http://localhost:3000/status/$JOB_ID | jq -r '.status')
+
+            if [[ "$STATUS" == *"complete"* ]]; then
+              echo "Job completed"
+              exit 0
+            fi
+
+            sleep 3
+          done
+
+          echo "Job failed"
+          exit 1
+
+      - name: Tear down stack
+        if: always()
+        run: docker-compose down
 
 # =====================================================
-
-integration:
-runs-on: ubuntu-latest
-needs: security
-
-```
-steps:
-  - uses: actions/checkout@v4
-
-  - name: Install jq
-    run: sudo apt-get install -y jq
-
-  - name: Start stack
-    run: docker-compose up -d --build
-
-  - name: Wait for API health (retry-safe)
-    run: |
-      for i in {1..20}; do
-        curl -f http://localhost:8000/health && break
-        sleep 3
-      done
-
-  - name: Submit job
-    run: |
-      JOB_ID=$(curl -s -X POST http://localhost:3000/submit | jq -r '.job_id')
-      echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
-
-  - name: Poll job status
-    run: |
-      for i in {1..15}; do
-        STATUS=$(curl -s http://localhost:3000/status/$JOB_ID | jq -r '.status')
-
-        if [[ "$STATUS" == *"complete"* ]]; then
-          echo "Job completed"
-          exit 0
-        fi
-
-        sleep 3
-      done
-
-      echo "Job failed"
-      exit 1
-
-  - name: Tear down stack
-    if: always()
-    run: docker-compose down
-```
-
+# 6. DEPLOY STAGE
 # =====================================================
+  deploy:
+    runs-on: ubuntu-latest
+    needs: integration
+    if: github.ref == 'refs/heads/main'
 
-# 6. DEPLOY STAGE (MAIN ONLY)
+    steps:
+      - uses: actions/checkout@v4
 
-# =====================================================
+      - name: Rolling deployment
+        run: |
+          docker-compose up -d --no-deps --build api
 
-deploy:
-runs-on: ubuntu-latest
-needs: integration
-if: github.ref == 'refs/heads/main'
+          for i in {1..12}; do
+            if curl -f http://localhost:8000/health; then
+              echo "Deployment successful"
+              exit 0
+            fi
+            sleep 5
+          done
 
-```
-steps:
-  - uses: actions/checkout@v4
-
-  - name: Rolling deployment (safe)
-    run: |
-      docker-compose up -d --no-deps --build api
-
-      for i in {1..12}; do
-        if curl -f http://localhost:8000/health; then
-          echo "Deployment successful"
-          exit 0
-        fi
-        sleep 5
-      done
-
-      echo "Deployment failed - rollback assumed"
-      exit 1
-```
+          echo "Deployment failed - rollback assumed"
+          exit 1
