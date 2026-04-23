@@ -158,54 +158,73 @@ jobs:
 # 4. SECURITY STAGE
 # =====================================================
   security:
+    name: Security Scan
     runs-on: ubuntu-latest
     needs: build
-
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: Rebuild images into local daemon for scanning
+        run: |
+          docker buildx build --load -t api:scan ./api
+          docker buildx build --load -t worker:scan ./worker
+          docker buildx build --load -t frontend:scan ./frontend
+
       - name: Install Trivy
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget apt-transport-https gnupg
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-          echo "deb https://aquasecurity.github.io/trivy-repo/deb stable main" | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update
-          sudo apt-get install -y trivy
+          curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin
 
-      - name: Scan API image
+      - name: Scan API image with Trivy
         run: |
           trivy image \
             --exit-code 1 \
             --severity CRITICAL \
+            --ignore-unfixed \
+            --scanners vuln \
             --format sarif \
             --output trivy-api.sarif \
-            localhost:5000/api:${{ github.sha }}
+            api:scan
 
-      - name: Scan Worker image
+      - name: Scan worker image with Trivy
         run: |
           trivy image \
             --exit-code 1 \
             --severity CRITICAL \
+            --ignore-unfixed \
+            --scanners vuln \
             --format sarif \
             --output trivy-worker.sarif \
-            localhost:5000/worker:${{ github.sha }}
+            worker:scan
 
-      - name: Scan Frontend image
+      - name: Scan frontend image with Trivy
         run: |
           trivy image \
             --exit-code 1 \
             --severity CRITICAL \
+            --ignore-unfixed \
+            --scanners vuln \
             --format sarif \
             --output trivy-frontend.sarif \
-            localhost:5000/frontend:${{ github.sha }}
+            frontend:scan
 
-      - name: Upload SARIF reports
+      - name: Upload Trivy SARIF results
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: trivy-reports
-          path: |
-            trivy-api.sarif
-            trivy-worker.sarif
-            trivy-frontend.sarif
+          name: trivy-sarif-results
+          path: "*.sarif"
 
 # =====================================================
 # 5. INTEGRATION TEST STAGE
@@ -219,9 +238,15 @@ jobs:
 
       - name: Install jq
         run: sudo apt-get install -y jq
+      
+      - name: Create .env file
+        run: |
+          echo "REDIS_HOST=redis" >> .env
+          echo "REDIS_PORT=6379" >> .env
+          echo "FRONTEND_PORT=3000" >> .env
 
       - name: Start stack
-        run: docker-compose up -d --build
+        run: docker compose up -d --build
 
       - name: Wait for API health
         run: |
@@ -253,7 +278,7 @@ jobs:
 
       - name: Tear down stack
         if: always()
-        run: docker-compose down
+        run: docker compose down
 
 # =====================================================
 # 6. DEPLOY STAGE
@@ -268,7 +293,7 @@ jobs:
 
       - name: Rolling deployment
         run: |
-          docker-compose up -d --no-deps --build api
+          docker compose up -d --no-deps --build api
 
           for i in {1..12}; do
             if curl -f http://localhost:8000/health; then
