@@ -299,9 +299,6 @@ jobs:
         run: docker compose down
 
 
-
-
-
 # =====================================================
 # 6. DEPLOY STAGE
 # =====================================================
@@ -313,17 +310,59 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Rolling deployment
+      - name: Create .env file
+        run: |
+          echo "REDIS_HOST=redis" >> .env
+          echo "REDIS_PORT=6379" >> .env
+          echo "FRONTEND_PORT=3000" >> .env
+
+      - name: Start existing stack
+        run: docker compose up -d --build
+
+      - name: Wait for stack to be ready
+        run: |
+          for i in {1..20}; do
+            if curl -sf http://localhost:3000 > /dev/null; then
+              echo "Stack is ready"
+              break
+            fi
+            echo "Attempt $i — waiting..."
+            sleep 5
+            if [ $i -eq 20 ]; then
+              echo "Stack never became ready"
+              docker compose logs
+              exit 1
+            fi
+          done
+
+      - name: Rolling update — rebuild and restart API
         run: |
           docker compose up -d --no-deps --build api
 
+      - name: Verify API health via frontend network
+        run: |
+          echo "Checking API health through Docker network..."
           for i in {1..12}; do
-            if curl -f http://localhost:8000/health; then
-              echo "Deployment successful"
+            STATUS=$(docker inspect \
+              --format='{{.State.Health.Status}}' \
+              $(docker compose ps -q api))
+
+            echo "Attempt $i — API health: $STATUS"
+
+            if [ "$STATUS" = "healthy" ]; then
+              echo "Deployment successful — API is healthy"
               exit 0
             fi
+
+            if [ "$STATUS" = "unhealthy" ]; then
+              echo "API is unhealthy — rolling back"
+              docker compose up -d --no-deps --build api
+              exit 1
+            fi
+
             sleep 5
           done
 
-          echo "Deployment failed - rollback assumed"
+          echo "Health check timed out after 60s — rolling back"
+          docker compose up -d --no-deps --build api
           exit 1
