@@ -42,8 +42,9 @@ jobs:
 
       - name: Install hadolint
         run: |
-          sudo apt-get update
-          sudo apt-get install -y hadolint
+          curl -sSL https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64 \
+            -o /usr/local/bin/hadolint
+          chmod +x /usr/local/bin/hadolint
 
       - name: Lint Dockerfiles
         run: |
