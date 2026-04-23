@@ -1,0 +1,71 @@
+
+services:
+  redis:
+    image: redis:7-alpine
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
+
+  api:
+    build: ./api
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    ports:
+      - "8000:8000"
+    networks:
+      - internal
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  worker:
+    build: ./worker
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    networks:
+      - internal
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+  frontend:
+    build: ./frontend
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      PORT: 3000
+      API_URL: http://api:8000
+    ports:
+      - "3000:3000"
+    networks:
+      - internal
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+networks:
+  internal:
+    driver: bridge
