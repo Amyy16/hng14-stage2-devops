@@ -238,47 +238,69 @@ jobs:
 
       - name: Install jq
         run: sudo apt-get install -y jq
-      
+
       - name: Create .env file
         run: |
           echo "REDIS_HOST=redis" >> .env
           echo "REDIS_PORT=6379" >> .env
-          echo "FRONTEND_PORT=3000" >> .env
+          echo "API_URL=http://api:8000" >> .env
 
       - name: Start stack
         run: docker compose up -d --build
 
-      - name: Wait for API health
+      # Only check port 3000 — that's the only port exposed to host
+      - name: Wait for frontend to be ready
         run: |
-          for i in {1..20}; do
-            curl -f http://localhost:8000/health && break
-            sleep 3
+          echo "Waiting for frontend on port 3000..."
+          for i in {1..30}; do
+            if curl -sf http://localhost:3000 > /dev/null; then
+              echo "Frontend is up"
+              break
+            fi
+            echo "Attempt $i — not ready yet"
+            sleep 5
+            if [ $i -eq 30 ]; then
+              echo "Stack never became ready"
+              docker compose logs
+              exit 1
+            fi
           done
 
       - name: Submit job
         run: |
-          JOB_ID=$(curl -s -X POST http://localhost:3000/submit | jq -r '.job_id')
+          RESPONSE=$(curl -s -X POST http://localhost:3000/submit)
+          echo "Response: $RESPONSE"
+          JOB_ID=$(echo $RESPONSE | jq -r '.job_id')
+          if [ "$JOB_ID" = "null" ] || [ -z "$JOB_ID" ]; then
+            echo "Failed to get job_id — dumping logs"
+            docker compose logs
+            exit 1
+          fi
           echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
 
       - name: Poll job status
         run: |
           for i in {1..15}; do
-            STATUS=$(curl -s http://localhost:3000/status/$JOB_ID | jq -r '.status')
-
-            if [[ "$STATUS" == *"complete"* ]]; then
-              echo "Job completed"
+            RESPONSE=$(curl -s http://localhost:3000/status/$JOB_ID)
+            STATUS=$(echo $RESPONSE | jq -r '.status')
+            echo "Attempt $i — status: $STATUS"
+            if [[ "$STATUS" == *"complet"* ]]; then
+              echo "Job completed successfully"
               exit 0
             fi
-
             sleep 3
           done
-
-          echo "Job failed"
+          echo "Job did not complete in time — dumping logs"
+          docker compose logs
           exit 1
 
       - name: Tear down stack
         if: always()
         run: docker compose down
+
+
+
+
 
 # =====================================================
 # 6. DEPLOY STAGE
