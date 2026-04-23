@@ -21,10 +21,8 @@ services:
       redis:
         condition: service_healthy
     environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-    ports:
-      - "8000:8000"
+       REDIS_HOST: ${REDIS_HOST}
+       REDIS_PORT: ${REDIS_PORT}
     networks:
       - internal
     deploy:
@@ -39,8 +37,8 @@ services:
       redis:
         condition: service_healthy
     environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
     networks:
       - internal
     deploy:
@@ -55,7 +53,7 @@ services:
         condition: service_healthy
     environment:
       PORT: 3000
-      API_URL: http://api:8000
+      API_URL: ${API_URL}
     ports:
       - "3000:3000"
     networks:
